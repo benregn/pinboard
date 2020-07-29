@@ -22,10 +22,15 @@
 package pinboard
 
 import (
+	"bufio"
+	"bytes"
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -60,6 +65,21 @@ var (
 
 	pinboardToken = ""
 )
+
+func fileExists(filename string) bool {
+	if _, err := os.Stat(filename); err == nil {
+		// path/to/whatever exists
+		return true
+	} else if os.IsNotExist(err) {
+		// path/to/whatever does *not* exist
+		return false
+	} else {
+		// Schrodinger: file may or may not exist. See err for details.
+
+		// Therefore, do *NOT* use !os.IsNotExist(err) to test for file existence
+		return false
+	}
+}
 
 // get checks if endpoint is a valid Pinboard API endpoint and then
 // constructs a valid endpoint URL including the required 'auth_token'
@@ -102,12 +122,50 @@ func get(endpoint string, options interface{}) (body []byte, err error) {
 	q.Add("format", "json")
 	u.RawQuery = q.Encode()
 
+	var hasCachedResp = true
+	var data []byte
+	underscoredPath := strings.Replace(u.Path, "/", "_", -1)
+	cacheDir := filepath.Join(os.TempDir(), "pinboard_http_cache")
+	cacheFilepath := filepath.Join(cacheDir, underscoredPath)
+	fmt.Println(cacheFilepath)
+	if fileExists(cacheFilepath) {
+		fmt.Println("cache hit")
+		data, err = ioutil.ReadFile(cacheFilepath)
+		if err != nil {
+			fmt.Println(err)
+			hasCachedResp = false
+		}
+		r := bufio.NewReader(bytes.NewReader(data))
+		res, err := http.ReadResponse(r, nil)
+		if err != nil {
+			fmt.Println(err)
+		}
+		if hasCachedResp {
+			body, err = ioutil.ReadAll(res.Body)
+			if err != nil {
+				return nil, err
+			}
+			return body, nil
+		}
+	}
+
 	// Call APImethod with fully constructed URL.
 	res, err := http.Get(u.String())
 	if err != nil {
 		return nil, err
 	}
 	defer res.Body.Close()
+
+	// serialize response
+	body, err = httputil.DumpResponse(res, true)
+
+	// write response to disk
+	os.MkdirAll(cacheDir, 0700)
+	err = ioutil.WriteFile(cacheFilepath, body, 0644)
+	if err != nil {
+		fmt.Println("failed to write cache file :(")
+		panic(err)
+	}
 
 	// Check the HTTP response status code. This will tell us
 	// whether the API token is not set (401) or if we somehow
